@@ -4,6 +4,7 @@ use crate::mdlist::{MDList, MDNode};
 use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
 
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use crossbeam_utils::atomic::AtomicCell;
 
@@ -45,16 +46,16 @@ unsafe impl<'a, T: Send + Sync, E: Send + Sync> Sync for Node<'a, T, E> {}
 #[repr(C)]
 pub struct Node<'a, T, E> {
     pub key: usize,
-    value: AtomicCell<Option<T>>,
+    value: Option<T>,
     node_desc: Atomic<NodeDesc<'a, T, E>>,
     next: Atomic<Self>,
     pub out_edges: Option<MDList<'a, E, T>>,
     pub in_edges: Option<MDList<'a, E, T>>,
 }
 
-impl<'a, T: Copy, E> Node<'a, T, E> {
-    pub fn value(&self) -> Option<T> {
-        self.value.load()
+impl<'a, T, E> Node<'a, T, E> {
+    pub fn value(&self) -> Option<&T> {
+        self.value.as_ref()
     }
 }
 
@@ -70,7 +71,7 @@ impl<'a, T, E> Node<'a, T, E> {
     ) -> Self {
         Self {
             key,
-            value: AtomicCell::new(value),
+            value,
             next,
             node_desc,
             out_edges,
@@ -218,7 +219,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
     pub fn execute_ops<'t>(
         &'t self,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         sender: std::sync::mpsc::Sender<ReturnCode<Atomic<Node<'a, T, E>>>>,
         guard: &'g Guard,
     ) where
@@ -251,7 +252,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         &'t self,
         vertex: usize,
         mut value: Option<T>,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
         inserted: &mut Shared<'t, Node<'a, T, E>>,
         pred: &mut Shared<'t, Node<'a, T, E>>,
@@ -266,7 +267,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
         let current = &mut self.head.load_consume(guard);
 
-        let n_desc = Atomic::new(NodeDesc::new(desc, opid));
+        let n_desc = Atomic::new(NodeDesc::new(Arc::clone(desc), opid));
         loop {
             // if self.bloom_filter.might_contain(vertex) {
             //     self.locate_pred(pred, current, vertex, guard);
@@ -309,10 +310,10 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     // The Node is in the list, but it is not certain that it has the new value.
                     // For this reason, we update the Node.
                     // FIXME:(rasmus) This returns Fail in the original code...
-                    current.as_ref().unwrap().value.store(value.take());
+                    current.deref_mut().value = value.take();
                     return ReturnCode::Success;
                 } else {
-                    match (*desc).status.load() {
+                    match desc.status.load() {
                         OpStatus::Active => {}
                         _ => return ReturnCode::Fail("Transaction is inactive".into()),
                     }
@@ -335,7 +336,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     }
                 }
             } else {
-                if let OpStatus::Active = (*desc).status.load() {
+                if let OpStatus::Active = desc.status.load() {
                 } else {
                     return ReturnCode::Fail("Transaction is inactive".into());
                 }
@@ -438,7 +439,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         edge: usize,
         value: Option<E>,
         direction_in: bool,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
         inserted: &mut Shared<'t, MDNode<'a, E, T>>,
         md_pred: &mut Shared<'a, MDNode<'a, E, T>>,
@@ -451,7 +452,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         *inserted = Shared::null();
         *md_pred = Shared::null();
 
-        let n_desc = Atomic::new(NodeDesc::new(desc, opid));
+        let n_desc = Atomic::new(NodeDesc::new(Arc::clone(desc), opid));
         let g_n_desc = &mut n_desc.load(SeqCst, guard);
 
         // Try to find the vertex to which the current key is adjacenct,
@@ -480,7 +481,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     if !Self::is_mdnode_exist(*md_current, edge) || is_delinv(pred_child.tag())
                     {
                         // Check if our transaction has been aborted by another thread
-                        match (*desc).status.load() {
+                        match desc.status.load() {
                             OpStatus::Active => {}
                             _ => return ReturnCode::Fail("Transaction is inactive".into()),
                         }
@@ -506,7 +507,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                                     false
                                 };
 
-                            let mut new_pred_desc = NodeDesc::new(desc, opid);
+                            let mut new_pred_desc = NodeDesc::new(Arc::clone(desc), opid);
                             if exists {
                                 new_pred_desc.override_as_find = true;
                             } else {
@@ -588,7 +589,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         if Self::is_key_exist(current_desc.as_ref().unwrap(), guard) {
                             return ReturnCode::Fail("Key already exists".into());
                         } else {
-                            if let OpStatus::Active = (*desc).status.load() {
+                            if let OpStatus::Active = desc.status.load() {
                             } else {
                                 return ReturnCode::Fail("Transaction is Inactive".into());
                             }
@@ -622,7 +623,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     unsafe fn delete_vertex<'t>(
         &'t self,
         vertex: usize,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
         deleted: &mut Shared<'t, Node<'a, T, E>>,
         pred: &mut Shared<'t, Node<'a, T, E>>,
@@ -637,7 +638,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         *deleted = Shared::null();
         let current = &mut self.head.load(SeqCst, guard);
 
-        let node_desc = Atomic::new(NodeDesc::new(desc, opid));
+        let node_desc = Atomic::new(NodeDesc::new(Arc::clone(desc), opid));
 
         loop {
             self.locate_pred(pred, current, vertex, guard);
@@ -657,7 +658,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     node_desc.load(SeqCst, guard).as_ref().unwrap(),
                 ) {
                     // Check if DeleteVertex operation is ongoing
-                    let pending_status = &(*desc).pending[opid];
+                    let pending_status = &desc.pending[opid];
                     if !pending_status.load() {
                         self.finish_delete_vertex(
                             current
@@ -688,7 +689,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                 }
 
                 if Self::is_key_exist(g_current_desc.as_ref().unwrap(), guard) {
-                    match (*desc).status.load() {
+                    match desc.status.load() {
                         OpStatus::Active => {}
                         _ => return ReturnCode::Fail("Transaction is Inactive".into()),
                     }
@@ -717,7 +718,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
                         // Only allow the thread that marks the operation
                         // complete to perform physical updates
-                        let pending_status = &(*desc).pending[opid];
+                        let pending_status = &desc.pending[opid];
                         if pending_status.compare_exchange(true, false).is_ok() {
                             *deleted = *current;
                             return ReturnCode::Success;
@@ -739,7 +740,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         vertex: usize,
         edge: usize,
         direction_in: bool,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
         deleted: &mut Shared<'t, MDNode<'a, E, T>>,
         md_pred: &mut Shared<'t, MDNode<'a, E, T>>,
@@ -754,7 +755,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         *md_pred = Shared::null();
         *current = self.head.load(SeqCst, guard);
 
-        let n_desc = Atomic::new(NodeDesc::new(desc, opid));
+        let n_desc = Atomic::new(NodeDesc::new(Arc::clone(desc), opid));
         let g_n_desc = &mut n_desc.load(SeqCst, guard);
 
         if self.find_vertex(current, g_n_desc, desc, vertex, guard) {
@@ -801,7 +802,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     }
 
                     if Self::is_key_exist(g_current_desc.as_ref().unwrap(), guard) {
-                        match (*desc).status.load() {
+                        match desc.status.load() {
                             OpStatus::Active => {}
                             _ => return ReturnCode::Fail("Transaction is inactive".into()),
                         }
@@ -834,7 +835,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     unsafe fn find<'t>(
         &'t self,
         key: usize,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
         guard: &Guard,
     ) -> ReturnCode<Atomic<Node<'a, T, E>>>
@@ -867,7 +868,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                 self.finish_pending_txn(g_current_desc, desc, guard);
 
                 if n_desc.load(SeqCst, guard).is_null() {
-                    n_desc = Atomic::new(NodeDesc::new(desc, opid));
+                    n_desc = Atomic::new(NodeDesc::new(Arc::clone(desc), opid));
                 }
 
                 let current_desc_ref = g_current_desc.as_ref().expect("No current desc");
@@ -880,7 +881,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                 }
 
                 if Self::is_key_exist(current_desc_ref, guard) {
-                    if let OpStatus::Active = (*desc).status.load() {
+                    if let OpStatus::Active = desc.status.load() {
                     } else {
                         return ReturnCode::Fail("Transaction is Inactive".into());
                     }
@@ -906,7 +907,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     #[inline]
     unsafe fn help_ops<'t>(
         &'t self,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         mut opid: usize,
         sender: &Option<std::sync::mpsc::Sender<ReturnCode<Atomic<Node<'a, T, E>>>>>,
         guard: &'g Guard,
@@ -914,7 +915,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         'a: 't,
     {
         // FIXME:(rasmus) Safe deref_mut()?
-        match (*desc).status.load() {
+        match desc.status.load() {
             OpStatus::Active => {}
             _ => return,
         }
@@ -922,15 +923,15 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         // Cyclic dependency check
         HELPSTACK.with(|hs| {
             for d in hs.borrow().iter() {
-                if std::ptr::eq(*d as *const _, desc) {
-                    (*desc)
+                if std::sync::Arc::ptr_eq(&Arc::from_raw(*d as *const _), &desc) {
+                    desc
                         .status
                         .compare_and_swap(OpStatus::Active, OpStatus::Aborted);
                     return;
                 }
             }
 
-            hs.borrow_mut().push(desc as *const _);
+            hs.borrow_mut().push(Arc::into_raw(Arc::clone(desc)) as *const _);
 
             let mut ret = ReturnCode::Success;
 
@@ -954,22 +955,21 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
             let mut md_ins_dims: Vec<usize> = Vec::new();
             let mut md_ins_pred_dims: Vec<usize> = Vec::new();
 
-            while let OpStatus::Active = (*desc).status.load() {
+            while let OpStatus::Active = desc.status.load() {
                 if let ReturnCode::Fail(_) = ret {
                     break;
                 }
 
-                if opid >= (*desc).size {
+                if opid >= desc.size {
                     break;
                 }
-                let op = &(*desc).ops[opid];
 
-                match op.optype {
-                    OpType::Insert(key, mut value) => {
+                match &mut desc.ops.borrow_mut()[opid].optype {
+                    OpType::Insert(key, ref mut value) => {
                         let mut inserted = Shared::null();
                         let mut pred = Shared::null();
                         ret = self.insert_vertex(
-                            key,
+                            *key,
                             value.take(),
                             desc,
                             opid,
@@ -982,7 +982,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         ins_pred_nodes.push(pred);
                     }
 
-                    OpType::InsertEdge(vertex, edge, mut value, direction_in) => {
+                    OpType::InsertEdge(vertex, edge, ref mut value, direction_in) => {
                         let mut inserted = Shared::null();
                         let mut md_pred = Shared::null();
                         let mut parent = Shared::null();
@@ -991,10 +991,10 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         let mut pred_dim = 0;
 
                         self.insert_edge(
-                            vertex,
-                            edge,
+                            *vertex,
+                            *edge,
                             value.take(),
-                            direction_in,
+                            *direction_in,
                             desc,
                             opid,
                             &mut inserted,
@@ -1020,7 +1020,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         let mut deleted = Shared::null();
                         let mut pred = Shared::null();
 
-                        self.delete_vertex(vertex, desc, opid, &mut deleted, &mut pred, guard);
+                        self.delete_vertex(*vertex, desc, opid, &mut deleted, &mut pred, guard);
 
                         del_nodes.push(deleted);
                         del_pred_nodes.push(pred);
@@ -1035,9 +1035,9 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         let mut pred_dim = 0;
 
                         self.delete_edge(
-                            vertex,
-                            edge,
-                            direction_in,
+                            *vertex,
+                            *edge,
+                            *direction_in,
                             desc,
                             opid,
                             &mut deleted,
@@ -1056,7 +1056,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     }
 
                     OpType::Find(key) => {
-                        ret = self.find(key, desc, opid, guard);
+                        ret = self.find(*key, desc, opid, guard);
                     }
                 }
 
@@ -1108,26 +1108,26 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
     #[inline]
     fn is_same_operation(desc: &NodeDesc<'a, T, E>, other: &NodeDesc<'a, T, E>) -> bool {
-        std::ptr::eq(desc.desc, other.desc) && desc.opid == other.opid
+        std::sync::Arc::ptr_eq(&desc.desc, &other.desc) && desc.opid == other.opid
     }
 
     #[inline]
     unsafe fn finish_pending_txn<'t>(
         &'t self,
         node_desc: Shared<NodeDesc<'a, T, E>>,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         guard: &Guard,
     ) where
         'a: 't,
     {
         if let Some(node_desc_ref) = node_desc.as_ref() {
-            let g_node_inner_desc = node_desc_ref.desc;
+            let g_node_inner_desc = &node_desc_ref.desc;
 
-            if std::ptr::eq(g_node_inner_desc, desc) {
+            if std::sync::Arc::ptr_eq(g_node_inner_desc, &desc) {
                 return;
             }
 
-            let optype = &(*g_node_inner_desc).ops[node_desc_ref.opid].optype;
+            let optype = &g_node_inner_desc.ops.borrow()[node_desc_ref.opid].optype;
             if let OpType::Delete(_) = optype {
                 if (*g_node_inner_desc).pending[node_desc_ref.opid].load() {
                     self.help_ops(desc, node_desc_ref.opid, &None, guard);
@@ -1135,7 +1135,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                 }
             }
 
-            self.help_ops(&*node_desc_ref.desc, node_desc_ref.opid, &None, guard);
+            self.help_ops(&node_desc_ref.desc, node_desc_ref.opid, &None, guard);
         }
     }
 
@@ -1143,7 +1143,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         &'t self,
         n: Shared<'t, MDNode<'a, E, T>>,
         dim: usize,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         node_desc: &Atomic<NodeDesc<'a, T, E>>,
         dimension: usize,
         guard: &Guard,
@@ -1164,7 +1164,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
             self.finish_pending_txn(g_current_desc, desc, guard);
 
-            match (*desc).status.load() {
+            match desc.status.load() {
                 OpStatus::Active => {}
                 _ => return,
             }
@@ -1214,12 +1214,10 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
     #[inline]
     fn is_node_active(desc: &NodeDesc<'a, T, E>, _guard: &Guard) -> bool {
-        unsafe {
-            if let OpStatus::Committed = (*desc.desc).status.load() {
-                true
-            } else {
-                false
-            }
+        if let OpStatus::Committed = desc.desc.status.load() {
+            true
+        } else {
+            false
         }
     }
 
@@ -1227,7 +1225,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     #[inline]
     unsafe fn is_key_exist(node_desc: &NodeDesc<'a, T, E>, guard: &Guard) -> bool {
         let is_node_active = Self::is_node_active(node_desc, guard);
-        let opoptype = &(*node_desc.desc).ops[node_desc.opid].optype;
+        let opoptype = &(*node_desc.desc).ops.borrow()[node_desc.opid].optype;
 
         match opoptype {
             OpType::Find(..) => return true,
@@ -1289,7 +1287,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         &'t self,
         curr: &mut Shared<'t, Node<'a, T, E>>,
         _n_desc: &mut Shared<'t, NodeDesc<'a, T, E>>,
-        desc: *const Desc<'a, T, E>,
+        desc: &Arc<Desc<'a, T, E>>,
         key: usize,
         guard: &Guard,
     ) -> bool {
@@ -1326,7 +1324,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         // parents: &[Shared<'a, Node<'a, T, E>>],
         dims: &[usize],
         pred_dims: &[usize],
-        desc: *const Desc<'a, T, E>,
+        desc: Arc<Desc<'a, T, E>>,
         guard: &Guard,
     ) where
         'a: 't,
@@ -1337,7 +1335,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                 let node_desc = &n.as_ref().expect("No node desc").node_desc;
                 let g_node_desc = node_desc.load(SeqCst, guard);
 
-                if std::ptr::eq(g_node_desc.as_ref().expect("No g_node desc").desc, desc)
+                if std::sync::Arc::ptr_eq(&g_node_desc.as_ref().expect("No g_node desc").desc, &desc)
                     && node_desc
                         .compare_and_set(
                             g_node_desc,
@@ -1371,7 +1369,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                 let node_desc = &node.as_ref().expect("No node_desc").node_desc;
                 let g_node_desc = node_desc.load(SeqCst, guard);
 
-                if std::ptr::eq(g_node_desc.as_ref().unwrap().desc, desc)
+                if std::sync::Arc::ptr_eq(&g_node_desc.as_ref().unwrap().desc, &desc)
                     && node_desc
                         .compare_and_set(
                             g_node_desc,
@@ -1404,14 +1402,14 @@ impl<'a, T, E> AdjacencyList<'a, T, E> {
 
 pub struct Transaction<'a: 't, 't, N, E> {
     pub status: OpStatus,
-    ops: *const Desc<'a, N, E>,
+    ops: Arc<Desc<'a, N, E>>,
     adjlist: &'t AdjacencyList<'a, N, E>,
 }
 
 impl<'a: 't, 't, N, E> Transaction<'a, 't, N, E> {
     pub fn new(adjlist: &'t AdjacencyList<'a, N, E>, operations: Vec<Operator<'a, N, E>>) -> Self {
         Transaction {
-            ops: Desc::alloc(operations),
+            ops: Arc::new(Desc::new(operations)),
             adjlist,
             status: OpStatus::Active,
         }
@@ -1421,7 +1419,7 @@ impl<'a: 't, 't, N, E> Transaction<'a, 't, N, E> {
     pub fn execute(self) -> std::sync::mpsc::Receiver<ReturnCode<Atomic<Node<'a, N, E>>>> {
         let (tx, rx) = std::sync::mpsc::channel();
         let guard = &epoch::pin();
-        self.adjlist.execute_ops(self.ops, tx, guard);
+        self.adjlist.execute_ops(&self.ops, tx, guard);
         rx
     }
 }

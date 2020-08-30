@@ -37,7 +37,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::types::*;
 
-trait Node {
+pub trait Node {
     fn id(&self) -> usize;
 }
 
@@ -250,11 +250,13 @@ impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
 mod graph_tests {
     use super::*;
 
+    #[derive(Debug)]
     pub struct Vertex {
         id: usize,
         data: usize,
     }
 
+    #[derive(Debug)]
     pub struct Edge {
         pub points_to: usize,
         pub extra_data: Option<usize>,
@@ -279,23 +281,23 @@ mod graph_tests {
         graph.add_vertex(Vertex{ id: 2, data: 345 });
         graph.add_vertex(Vertex{ id: 3, data: 678 });
         let vertices: Vec<_> =  graph.iter_vertices().collect();
-        assert_eq!(vertices[0].value(), Some(123));
-        assert_eq!(vertices[1].value(), Some(456));
-        assert_eq!(vertices[2].value(), Some(789));
+        assert_eq!(vertices[0].value().map(|v| v.data), Some(123));
+        assert_eq!(vertices[1].value().map(|v| v.data), Some(345));
+        assert_eq!(vertices[2].value().map(|v| v.data), Some(678));
     }
 
-    // #[test]
-    // fn test_edge_insertion() {
-    //     let graph = Graph::<Vertex, Edge>::directed();
-    //     graph.add_vertex(1, Some(123));
-    //     graph.add_vertex(2, Some(456));
+    #[test]
+    fn test_edge_insertion() {
+        let graph = Graph::<Vertex, Edge>::directed();
+        graph.add_vertex(Vertex{ id: 1, data: 123 });
+        graph.add_vertex(Vertex{ id: 2, data: 123 });
 
-    //     let vertices: Vec<_> =  graph.iter_vertices().collect();
-    //     assert_eq!(vertices[0].in_edges.as_ref().unwrap().len(), 0);
-    //     graph.add_edge(1, EdgeInfo {
-    //         node_id: 2,
-    //         weight: None,
-    //     }, true);
-    //     assert_eq!(vertices[0].in_edges.as_ref().unwrap().len(), 1);
-    // }
+        let vertices: Vec<_> =  graph.iter_vertices().collect();
+        assert_eq!(vertices[0].in_edges.as_ref().unwrap().len(), 0);
+        graph.add_edge(1, Edge {
+            points_to: 2,
+            extra_data: Some(12345),
+        }, true);
+        assert_eq!(vertices[0].in_edges.as_ref().unwrap().len(), 1);
+    }
 }
