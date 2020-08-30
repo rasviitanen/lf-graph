@@ -220,7 +220,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     pub fn execute_ops<'t>(
         &'t self,
         desc: &Arc<Desc<'a, T, E>>,
-        sender: std::sync::mpsc::Sender<ReturnCode<Atomic<Node<'a, T, E>>>>,
+        sender: std::sync::mpsc::Sender<ReturnCode<RefEntry<'a, 't, T, E>>>,
         guard: &'g Guard,
     ) where
         'a: 't,
@@ -257,7 +257,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         inserted: &mut Shared<'t, Node<'a, T, E>>,
         pred: &mut Shared<'t, Node<'a, T, E>>,
         guard: &Guard,
-    ) -> ReturnCode<Atomic<Node<'a, T, E>>>
+    ) -> ReturnCode<RefEntry<'a, 't, T, E>>
     where
         'a: 't,
     {
@@ -331,8 +331,8 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         .is_ok()
                     {
                         *inserted = *current;
-                        return ReturnCode::Inserted(self.cursor.clone());
-                        // return ReturnCode::Inserted(RefEntry { node: *inserted });
+                        // return ReturnCode::Inserted(self.cursor.clone());
+                        return ReturnCode::Inserted(RefEntry { node: *inserted });
                     }
                 }
             } else {
@@ -368,8 +368,8 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     *inserted = p;
                     self.cursor.store(*inserted, Relaxed);
                     // self.bloom_filter.set(vertex);
-                    return ReturnCode::Inserted(self.cursor.clone());
-                    // return ReturnCode::Inserted(RefEntry { node: *inserted });
+                    // return ReturnCode::Inserted(self.cursor.clone());
+                    return ReturnCode::Inserted(RefEntry { node: *inserted });
                 }
 
                 *current = if is_marked(next.load(SeqCst, epoch::unprotected()).tag()) {
@@ -447,7 +447,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         dim: &mut usize,
         pred_dim: &mut usize,
         guard: &Guard,
-    ) -> ReturnCode<Atomic<Node<T, E>>> {
+    ) -> ReturnCode<RefEntry<'a, 't, T, E>> {
         let guard = &*(guard as *const _);
         *inserted = Shared::null();
         *md_pred = Shared::null();
@@ -628,7 +628,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         deleted: &mut Shared<'t, Node<'a, T, E>>,
         pred: &mut Shared<'t, Node<'a, T, E>>,
         guard: &Guard,
-    ) -> ReturnCode<Atomic<Node<T, E>>>
+    ) -> ReturnCode<RefEntry<'a, 't, T, E>>
     where
         'a: 't,
     {
@@ -680,8 +680,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         // complete to perform physical updates
                         if pending_status.compare_exchange(true, false).is_ok() {
                             *deleted = *current;
-                            return ReturnCode::Success;
-                            // return ReturnCode::Deleted(RefEntry { node: *deleted });
+                            return ReturnCode::Deleted(RefEntry { node: *deleted });
                         }
                     }
 
@@ -721,8 +720,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         let pending_status = &desc.pending[opid];
                         if pending_status.compare_exchange(true, false).is_ok() {
                             *deleted = *current;
-                            return ReturnCode::Success;
-                            // return ReturnCode::Deleted(RefEntry { node: *deleted });
+                            return ReturnCode::Deleted(RefEntry { node: *deleted });
                         }
                     }
                 } else {
@@ -838,7 +836,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
         guard: &Guard,
-    ) -> ReturnCode<Atomic<Node<'a, T, E>>>
+    ) -> ReturnCode<RefEntry<'a, 't, T, E>>
     where
         'a: 't,
     {
@@ -891,8 +889,8 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         .compare_and_set(g_current_desc, n_desc.load(SeqCst, guard), SeqCst, guard)
                         .is_ok()
                     {
-                        return ReturnCode::Success;
-                        // return ReturnCode::Found(RefEntry { node: *current });
+                        // return ReturnCode::Success;
+                        return ReturnCode::Found(RefEntry { node: *current });
                     }
                 } else {
                     return ReturnCode::Fail("Requested key does not exist".into());
@@ -909,7 +907,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         &'t self,
         desc: &Arc<Desc<'a, T, E>>,
         mut opid: usize,
-        sender: &Option<std::sync::mpsc::Sender<ReturnCode<Atomic<Node<'a, T, E>>>>>,
+        sender: &Option<std::sync::mpsc::Sender<ReturnCode<RefEntry<'a, 't, T, E>>>>,
         guard: &'g Guard,
     ) where
         'a: 't,
@@ -990,7 +988,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         let mut dim = 0;
                         let mut pred_dim = 0;
 
-                        self.insert_edge(
+                        ret = self.insert_edge(
                             *vertex,
                             *edge,
                             value.take(),
@@ -1020,7 +1018,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         let mut deleted = Shared::null();
                         let mut pred = Shared::null();
 
-                        self.delete_vertex(*vertex, desc, opid, &mut deleted, &mut pred, guard);
+                        ret = self.delete_vertex(*vertex, desc, opid, &mut deleted, &mut pred, guard);
 
                         del_nodes.push(deleted);
                         del_pred_nodes.push(pred);
@@ -1074,34 +1072,34 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     .is_ok()
                 {
                     // FIXME:(rasmus) call mark for deletion here
-                    // Self::mark_for_deletion(
-                    //     &ins_nodes,
-                    //     &ins_pred_nodes,
-                    //     &md_ins_pred_nodes,
-                    //     &md_ins_pred_nodes,
-                    //     // &md_ins_parent_nodes,
-                    //     &md_ins_dims,
-                    //     &md_ins_pred_dims,
-                    //     desc,
-                    //     guard,
-                    // );
+                    Self::mark_for_deletion(
+                        &ins_nodes,
+                        &ins_pred_nodes,
+                        &md_ins_pred_nodes,
+                        &md_ins_pred_nodes,
+                        // &md_ins_parent_nodes,
+                        &md_ins_dims,
+                        &md_ins_pred_dims,
+                        desc,
+                        guard,
+                    );
                 }
             } else if (*desc)
                 .status
                 .compare_exchange(OpStatus::Active, OpStatus::Committed)
                 .is_ok()
             {
-                // Self::mark_for_deletion(
-                //     &del_nodes,
-                //     &del_pred_nodes,
-                //     &md_del_nodes,
-                //     &md_del_pred_nodes,
-                //     // &md_del_parent_nodes,
-                //     &md_del_dims,
-                //     &md_del_pred_dims,
-                //     desc,
-                //     guard,
-                // )
+                Self::mark_for_deletion(
+                    &del_nodes,
+                    &del_pred_nodes,
+                    &md_del_nodes,
+                    &md_del_pred_nodes,
+                    // &md_del_parent_nodes,
+                    &md_del_dims,
+                    &md_del_pred_dims,
+                    desc,
+                    guard,
+                )
             }
         });
     }
@@ -1324,7 +1322,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         // parents: &[Shared<'a, Node<'a, T, E>>],
         dims: &[usize],
         pred_dims: &[usize],
-        desc: Arc<Desc<'a, T, E>>,
+        desc: &Arc<Desc<'a, T, E>>,
         guard: &Guard,
     ) where
         'a: 't,
@@ -1416,7 +1414,7 @@ impl<'a: 't, 't, N, E> Transaction<'a, 't, N, E> {
     }
 
     #[must_use]
-    pub fn execute(self) -> std::sync::mpsc::Receiver<ReturnCode<Atomic<Node<'a, N, E>>>> {
+    pub fn execute(self) -> std::sync::mpsc::Receiver<ReturnCode<RefEntry<'a, 't, N, E>>> {
         let (tx, rx) = std::sync::mpsc::channel();
         let guard = &epoch::pin();
         self.adjlist.execute_ops(&self.ops, tx, guard);

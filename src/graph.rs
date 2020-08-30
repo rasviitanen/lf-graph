@@ -26,7 +26,7 @@ pub trait GraphAPI {
 }
 
 use crate::adjlist::AdjacencyList;
-use crate::adjlist::{IterRefEntry, Node as InternalNode};
+use crate::adjlist::{IterRefEntry, RefEntry, Node as InternalNode};
 
 use crate::lftt::{OpType, ReturnCode};
 use std::sync::atomic::Ordering::{SeqCst};
@@ -73,14 +73,14 @@ impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
     pub fn execute_ops<'t>(
         &'t self,
         ops: Vec<OpType<'a, V, E>>,
-    ) -> std::sync::mpsc::Receiver<ReturnCode<Atomic<InternalNode<'a, V, E>>>> {
+    ) -> std::sync::mpsc::Receiver<ReturnCode<RefEntry<'a, 't, V, E>>> {
         self.inner.txn(ops).execute()
     }
 
     pub fn add_vertex<'t>(
         &'t self,
         value: V,
-    ) -> Option<(usize, Atomic<InternalNode<'a, V, E>>)> {
+    ) -> Option<(usize, RefEntry<'a, 't, V, E>)> {
         let key = value.id();
         let op = OpType::Insert(key, Some(value));
         let insertion_txn = self.inner.txn(vec![op]).execute();
@@ -115,7 +115,7 @@ impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
         self.inner.iter(guard)
     }
 
-    pub fn find_vertex<'t>(&'t self, key: usize) -> Option<Atomic<InternalNode<'a, V, E>>> {
+    pub fn find_vertex<'t>(&'t self, key: usize) -> Option<RefEntry<'a, 't, V, E>> {
         let op = OpType::Find(key);
         let find_txn = self.inner.txn(vec![op]);
         let res = find_txn.execute();
@@ -127,7 +127,7 @@ impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
         }
     }
 
-    pub fn delete_vertex<'t>(&'t self, key: usize) -> Option<Atomic<InternalNode<'a, V, E>>> {
+    pub fn delete_vertex<'t>(&'t self, key: usize) -> Option<RefEntry<'a, 't, V, E>> {
         let op = OpType::Delete(key);
         let insertion_txn = self.inner.txn(vec![op]).execute();
 
@@ -284,6 +284,28 @@ mod graph_tests {
         assert_eq!(vertices[0].value().map(|v| v.data), Some(123));
         assert_eq!(vertices[1].value().map(|v| v.data), Some(345));
         assert_eq!(vertices[2].value().map(|v| v.data), Some(678));
+    }
+
+    #[test]
+    fn test_find_vertex() {
+        let graph = Graph::<Vertex, Edge>::directed();
+        graph.add_vertex(Vertex{ id: 1, data: 123 });
+        let vertex = graph.find_vertex(1);
+        assert!(vertex.is_some());
+        assert_eq!(vertex.unwrap().value().map(|v| v.data), Some(123));
+    }
+
+    #[test]
+    fn test_delete_vertex() {
+        let graph = Graph::<Vertex, Edge>::directed();
+        graph.add_vertex(Vertex{ id: 1, data: 123 });
+        let vertex = graph.find_vertex(1);
+        assert!(vertex.is_some());
+        assert_eq!(vertex.unwrap().value().map(|v| v.data), Some(123));
+        let deleted = graph.delete_vertex(1);
+        assert_eq!(deleted.unwrap().value().map(|v| v.data), Some(123));
+        let vertex = graph.find_vertex(1);
+        assert!(vertex.is_none());
     }
 
     #[test]
