@@ -386,7 +386,6 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     /// # Safety
     ///
     /// Should not be called directly?
-    #[inline]
     pub unsafe fn connect<'t>(
         vertex_node: &Node<'a, T, E>,
         edge: usize,
@@ -432,7 +431,6 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         ReturnCode::Success
     }
 
-    #[inline]
     unsafe fn insert_edge<'t>(
         &'t self,
         vertex: usize,
@@ -896,7 +894,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     return ReturnCode::Fail("Requested key does not exist".into());
                 }
             } else {
-                return ReturnCode::Fail("Reqested node does not exist".into());
+                return ReturnCode::Fail("Requested node does not exist".into());
             }
         }
     }

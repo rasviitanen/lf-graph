@@ -9,3 +9,10 @@ edition = "2018"
 [dependencies]
 crossbeam-epoch = "0.8"
 crossbeam-utils = "0.7"
+
+[dev-dependencies]
+criterion = "0.3"
+
+[[bench]]
+name = "graph"
+harness = false

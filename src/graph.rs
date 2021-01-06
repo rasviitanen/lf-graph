@@ -13,9 +13,6 @@ pub trait GraphAPI {
     fn delete_edge(&self, v: Self::Id, e: Self::Id) -> Result<(), ()>;
     fn delete_vertex(&self, v: Self::Id) -> Option<Self::Vertex>;
 
-    fn num_nodes(&self) -> usize;
-    fn num_edges(&self) -> usize;
-
     fn out_degree(&self, v: Self::Id) -> usize;
     fn in_degree(&self, v: Self::Id) -> usize;
 
@@ -41,40 +38,65 @@ pub trait Node {
     fn id(&self) -> usize;
 }
 
+struct GraphTxn<'a, 't, V: Node, E: Node>{
+    graph: &'t Graph<'a, V, E>,
+    operations: Vec<OpType<'a, V, E>>
+}
+
+impl<'a: 't, 't, V: Node, E: Node> GraphTxn<'a, 't, V, E> {
+    pub fn new(graph: &'t Graph<'a, V, E>) -> Self {
+        Self {
+            graph,
+            operations: Vec::new(),
+        }
+    }
+
+    #[must_use = "Transaction does nothing unless executed"]
+    pub fn insert(&mut self, v: V) -> &mut Self {
+        self.operations.push(OpType::Insert(v.id(), Some(v)));
+        self
+    }
+
+    #[must_use = "Transaction does nothing unless executed"]
+    pub fn delete_vertex(&mut self, key: usize) -> &mut Self {
+        self.operations.push(OpType::Delete(key));
+        self
+    }
+
+    #[must_use = "Transaction does nothing unless executed"]
+    pub fn find_vertex(&mut self, key: usize) -> &mut Self {
+        self.operations.push(OpType::Find(key));
+        self
+    }
+
+    #[must_use = "Transaction does nothing unless executed"]
+    pub fn insert_edge(&mut self, vertex_key: usize, edge_key: usize, edge_info: Option<E>) -> &mut Self {
+        self.operations.push(OpType::InsertEdge(vertex_key, edge_key, edge_info, true));
+        self
+    }
+
+    #[must_use = "Transaction does nothing unless executed"]
+    pub fn delete_edge(&mut self, vertex_key: usize, edge_key: usize) -> &mut Self {
+        self.operations.push(OpType::DeleteEdge(vertex_key, edge_key, true));
+        self
+    }
+
+    pub fn execute(
+        &mut self,
+    ) -> std::sync::mpsc::Receiver<ReturnCode<RefEntry<'a, 't, V, E>>> {
+        self.graph.inner.txn(self.operations.drain(0..).collect()).execute()
+    }
+}
+
 pub struct Graph<'a, V: Node, E: Node> {
     inner: AdjacencyList<'a, V, E>,
-    cache: Arc<RwLock<BTreeMap<NodeId, &'a InternalNode<'a, V, E>>>>,
-    directed: bool,
-    num_nodes: usize,
-    num_edges: usize,
 }
 
 impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
-    pub fn directed() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: AdjacencyList::new(),
-            cache: Arc::new(RwLock::new(BTreeMap::new())),
-            directed: true,
-            num_nodes: 0,
-            num_edges: 0,
         }
-    }
-
-    pub fn undirected() -> Self {
-        Self {
-            inner: AdjacencyList::new(),
-            cache: Arc::new(RwLock::new(BTreeMap::new())),
-            directed: false,
-            num_nodes: 0,
-            num_edges: 0,
-        }
-    }
-
-    pub fn execute_ops<'t>(
-        &'t self,
-        ops: Vec<OpType<'a, V, E>>,
-    ) -> std::sync::mpsc::Receiver<ReturnCode<RefEntry<'a, 't, V, E>>> {
-        self.inner.txn(ops).execute()
     }
 
     pub fn add_vertex<'t>(
@@ -154,98 +176,17 @@ impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
         }
     }
 
-    #[inline]
-    fn is_directed(&self) -> bool {
-        self.directed
+    fn out_neigh<'t>(&self, node: &'t RefEntry<'a, 't, V, E>) -> Range<'t, &'a E> {
+        let guard = unsafe { &*(&epoch::pin() as *const _) };
+        Box::new(node.out_edges.as_ref().unwrap().iter(guard).map(|e| e.node.val.as_ref().unwrap()))
     }
 
-    #[inline]
-    fn num_nodes(&self) -> usize {
-        self.num_nodes
-    }
-
-    #[inline]
-    fn num_edges(&self) -> usize {
-        if self.directed {
-            self.num_edges
-        } else {
-            self.num_edges * 2
-        }
-    }
-
-    fn out_degree(&self, v: NodeId) -> usize {
-        if v == 0 {
-            // Our datastructure cannot handle id 0
-            return 0;
-        }
-
-        if let Some(found) = self.cache.read().unwrap().get(&v) {
-            found.out_edges.as_ref().unwrap().len()
-        } else {
-            panic!("Vertex not found");
-        }
-    }
-
-    fn in_degree(&self, v: NodeId) -> usize {
-        if v == 0 {
-            // Our datastructure cannot handle id 0
-            return 0;
-        }
-
-        if let Some(found) = self.cache.read().unwrap().get(&v) {
-            found.in_edges.as_ref().unwrap().len()
-        } else {
-            panic!("Vertex not found");
-        }
-    }
-
-    fn out_neigh(&self, v: NodeId) -> Range<E> {
-        unimplemented!();
-        // if v == 0 || v == 18446744073709551615 {
-        //     // Our datastructure cannot handle id 0
-        //     return Box::new(Vec::new().into_iter());
-        // }
-
-        // let guard = unsafe { &*(&epoch::pin() as *const _) };
-        // if let Some(found) = self.cache.read().unwrap().get(&v) {
-        //     // self.find_vertex(v) {
-        //     let edges = found.out_edges.as_ref().unwrap();
-        //     let picked_edges = edges.iter(guard).map(|e| *e.value().unwrap());
-        //     // picked_edges
-        //     Box::new(picked_edges)
-        // } else {
-        //     panic!("Vertex not found");
-        // }
-    }
-
-    fn in_neigh(&self, v: NodeId) -> Range<E> {
-        unimplemented!();
-
-        // if v == 0 {
-        //     // Our datastructure cannot handle id 0
-        //     return Box::new(Vec::new().into_iter());
-        // }
-
-        // let guard = unsafe { &*(&epoch::pin() as *const _) };
-        // if let Some(found) = self.cache.read().unwrap().get(&v) {
-        //     // self.find_vertex(v) {
-        //     let edges = found.in_edges.as_ref().unwrap();
-        //     let picked_edges = edges.iter(guard).map(|e| *e.value().unwrap());
-        //     // picked_edges
-        //     Box::new(picked_edges)
-        // } else {
-        //     panic!("Vertex not found");
-        // }
-    }
-
-    fn vertices(&self) -> Range<V> {
-        unimplemented!();
-
-        // let guard = unsafe { &*(&epoch::pin() as *const _) };
-        // let iter = self.inner.iter(guard).map(|v| CustomNode(v.get().key));
-        // Box::new(iter)
+    fn in_neigh<'t>(&self, node: &'t RefEntry<'a, 't, V, E>) -> Range<'t, &'a E> {
+        let guard = unsafe { &*(&epoch::pin() as *const _) };
+        Box::new(node.in_edges.as_ref().unwrap().iter(guard).map(|e| e.node.val.as_ref().unwrap()))
     }
 }
+
 #[cfg(test)]
 mod graph_tests {
     use super::*;
@@ -276,7 +217,7 @@ mod graph_tests {
 
     #[test]
     fn test_vertex_insertion() {
-        let graph = Graph::<Vertex, Edge>::directed();
+        let graph = Graph::<Vertex, Edge>::new();
         graph.add_vertex(Vertex{ id: 1, data: 123 });
         graph.add_vertex(Vertex{ id: 2, data: 345 });
         graph.add_vertex(Vertex{ id: 3, data: 678 });
@@ -288,7 +229,7 @@ mod graph_tests {
 
     #[test]
     fn test_find_vertex() {
-        let graph = Graph::<Vertex, Edge>::directed();
+        let graph = Graph::<Vertex, Edge>::new();
         graph.add_vertex(Vertex{ id: 1, data: 123 });
         let vertex = graph.find_vertex(1);
         assert!(vertex.is_some());
@@ -297,7 +238,7 @@ mod graph_tests {
 
     #[test]
     fn test_delete_vertex() {
-        let graph = Graph::<Vertex, Edge>::directed();
+        let graph = Graph::<Vertex, Edge>::new();
         graph.add_vertex(Vertex{ id: 1, data: 123 });
         let vertex = graph.find_vertex(1);
         assert!(vertex.is_some());
@@ -310,7 +251,7 @@ mod graph_tests {
 
     #[test]
     fn test_edge_insertion() {
-        let graph = Graph::<Vertex, Edge>::directed();
+        let graph = Graph::<Vertex, Edge>::new();
         graph.add_vertex(Vertex{ id: 1, data: 123 });
         graph.add_vertex(Vertex{ id: 2, data: 123 });
 
@@ -321,5 +262,125 @@ mod graph_tests {
             extra_data: Some(12345),
         }, true);
         assert_eq!(vertices[0].in_edges.as_ref().unwrap().len(), 1);
+    }
+
+
+    #[test]
+    fn test_in_neigh() {
+        let graph = Graph::<Vertex, Edge>::new();
+        graph.add_vertex(Vertex{ id: 1, data: 123 });
+        graph.add_vertex(Vertex{ id: 2, data: 123 });
+
+        let vertices: Vec<_> =  graph.iter_vertices().collect();
+        assert_eq!(vertices[0].in_edges.as_ref().unwrap().len(), 0);
+        graph.add_edge(1, Edge {
+            points_to: 2,
+            extra_data: Some(12345),
+        }, true);
+
+
+        let in_neigh = graph.in_neigh(&vertices[0]).collect::<Vec<_>>();
+        assert_eq!(in_neigh[0].points_to, 2);
+    }
+
+
+    #[test]
+    fn test_txn_simple() {
+        let graph = Graph::<Vertex, Edge>::new();
+        GraphTxn::new(&graph)
+            .insert(Vertex { id: 1, data: 123 } )
+            .insert(Vertex { id: 2, data: 456 } )
+            .insert(Vertex { id: 3, data: 789 } )
+            .execute();
+
+        let result = GraphTxn::new(&graph)
+            .find_vertex(1)
+            .find_vertex(2)
+            .find_vertex(3)
+            .execute();
+
+        for i in 1..=3 {
+            if let Ok(ReturnCode::Found(v)) = result.recv() {
+                assert_eq!(v.value().unwrap().id, i);
+            } else {
+                panic!("Could not find inserted vertices");
+            }
+        }
+    }
+
+    #[test]
+    fn test_threaded_txn_simple() {
+        let graph = Arc::new(Graph::<Vertex, Edge>::new());
+
+        let graph_clone = Arc::clone(&graph);
+        let tx1 = std::thread::spawn(move || {
+            GraphTxn::new(&graph_clone)
+                .insert(Vertex { id: 1, data: 123 } )
+                .insert(Vertex { id: 2, data: 456 } )
+                .insert(Vertex { id: 3, data: 789 } )
+                .execute();
+        });
+
+        tx1.join().unwrap();
+
+        let result = GraphTxn::new(&graph)
+            .find_vertex(1)
+            .find_vertex(2)
+            .find_vertex(3)
+            .execute();
+
+
+        for i in 1..=3 {
+            if let Ok(ReturnCode::Found(v)) = result.recv() {
+                assert_eq!(v.value().unwrap().id, i);
+            } else {
+                panic!("Could not find inserted vertices, {:?}", i);
+            }
+        }
+    }
+
+    #[test]
+    fn test_multiple_txn_simple() {
+        let graph = Graph::<Vertex, Edge>::new();
+
+        GraphTxn::new(&graph)
+            .insert(Vertex { id: 1, data: 1 } )
+            .insert(Vertex { id: 2, data: 2 } )
+            .execute();
+
+        GraphTxn::new(&graph)
+                .insert(Vertex { id: 3, data: 3 } )
+                .insert(Vertex { id: 4, data: 4 } )
+                .execute();
+
+        GraphTxn::new(&graph)
+                .insert(Vertex { id: 5, data: 5 } )
+                .insert(Vertex { id: 6, data: 6 } )
+                .execute();
+
+        GraphTxn::new(&graph)
+                .insert(Vertex { id: 7, data: 7 } )
+                .insert(Vertex { id: 8, data: 8 } )
+                .execute();
+
+
+        let result = GraphTxn::new(&graph)
+            .find_vertex(1)
+            .find_vertex(2)
+            .find_vertex(3)
+            .find_vertex(4)
+            .find_vertex(5)
+            .find_vertex(6)
+            .find_vertex(7)
+            .find_vertex(8)
+            .execute();
+
+        for i in 1..=8 {
+            if let Ok(ReturnCode::Found(v)) = result.recv() {
+                assert_eq!(v.value().unwrap().id, i);
+            } else {
+                panic!("Could not find inserted vertices, {:?}", i);
+            }
+        }
     }
 }

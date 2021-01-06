@@ -4,6 +4,10 @@ mod mdlist;
 mod types;
 mod graph;
 
+pub mod prelude {
+    
+}
+
 // use crate::adjlist::AdjacencyList;
 // use crate::adjlist::{IterRefEntry, Node};
 

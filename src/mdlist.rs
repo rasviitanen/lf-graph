@@ -267,7 +267,7 @@ pub struct MDDesc<'a, T, P> {
 pub struct MDNode<'a, T, P> {
     pub key: usize,
     coord: [usize; DIMENSION],
-    val: Option<T>,
+    pub val: Option<T>,
     pub pending: Atomic<MDDesc<'a, T, P>>,
     pub node_desc: Atomic<NodeDesc<'a, P, T>>,
     pub children: [Atomic<Self>; DIMENSION],
