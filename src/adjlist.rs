@@ -250,7 +250,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     #[inline]
     pub unsafe fn insert_vertex<'t>(
         &'t self,
-        vertex: usize,
+        vertex: u64,
         mut value: Option<T>,
         desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
@@ -279,7 +279,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
             // }
 
             // Check if node is physically in the list
-            if Self::is_node_exist(*current, vertex) {
+            if Self::is_node_exist(*current, vertex as usize) {
                 // If the node is physically in the list, it may be possible to simply update the descriptor
                 let current_ref = &current.as_ref().unwrap();
                 let current_desc = &current_ref.node_desc;
@@ -350,7 +350,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     out_edges.head().load(SeqCst, guard).deref_mut().node_desc = n_desc.clone();
 
                     new_node.replace(Node::new(
-                        vertex,
+                        vertex as usize,
                         value.take(),
                         Atomic::null(),
                         n_desc.clone(),
@@ -388,7 +388,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     /// Should not be called directly?
     pub unsafe fn connect<'t>(
         vertex_node: &Node<'a, T, E>,
-        edge: usize,
+        edge: u64,
         edge_node: E,
         direction_in: bool,
     ) -> ReturnCode<Atomic<Node<'a, T, E>>> {
@@ -408,17 +408,17 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         };
         let md_current = &mut mdlist.head().load(SeqCst, guard);
 
-        let new_md_node = MDNode::new(edge, Some(edge_node));
+        let new_md_node = MDNode::new(edge as usize, Some(edge_node));
         let new_node = Atomic::new(new_md_node);
 
-        let coord = MDList::<E, T>::key_to_coord(edge);
+        let coord = MDList::<E, T>::key_to_coord(edge as usize);
         MDList::locate_pred(&coord, md_pred, md_current, dim, pred_dim, guard);
         let md_pred_ref = md_pred.as_ref().expect("MDPred was NULL");
         let pred_child = md_pred_ref.children[*pred_dim].load(SeqCst, guard);
 
         // Check if the node is physically NOT within the list, or that it is there, but marked for deletion
         // If it is marked for deletion, the mdlist will physically remove it during the call to mdlist->Insert
-        if !Self::is_mdnode_exist(*md_current, edge) || is_delinv(pred_child.tag()) {
+        if !Self::is_mdnode_exist(*md_current, edge as usize) || is_delinv(pred_child.tag()) {
             //Check if our transaction has been aborted by another thread
             let result = mdlist.insert(&new_node, md_pred, md_current, dim, pred_dim, guard);
 
@@ -433,8 +433,8 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
     unsafe fn insert_edge<'t>(
         &'t self,
-        vertex: usize,
-        edge: usize,
+        vertex: u64,
+        edge: u64,
         value: Option<E>,
         direction_in: bool,
         desc: &Arc<Desc<'a, T, E>>,
@@ -455,7 +455,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
         // Try to find the vertex to which the current key is adjacenct,
         // if it is not found, we check if the vertex and edge are the same vertex.
-        if self.find_vertex(current, g_n_desc, desc, vertex, guard) {
+        if self.find_vertex(current, g_n_desc, desc, vertex as usize, guard) {
             if let Some(current_ref) = current.as_ref() {
                 let mdlist = &if direction_in {
                     current_ref.in_edges.as_ref().expect("NO MD LIST")
@@ -464,19 +464,19 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                 };
                 let md_current = &mut mdlist.head().load(SeqCst, guard);
 
-                let mut new_md_node = MDNode::new(edge, value);
+                let mut new_md_node = MDNode::new(edge as usize, value);
                 new_md_node.node_desc = n_desc.clone();
                 let new_node = Atomic::new(new_md_node);
 
                 loop {
-                    let coord = MDList::<E, T>::key_to_coord(edge);
+                    let coord = MDList::<E, T>::key_to_coord(edge as usize);
                     MDList::locate_pred(&coord, md_pred, md_current, dim, pred_dim, guard);
                     let md_pred_ref = md_pred.as_ref().unwrap();
                     let pred_child = md_pred_ref.children[*pred_dim].load(SeqCst, guard);
 
                     // Check if the node is physically NOT within the list, or that it is there, but marked for deletion
                     // If it is marked for deletion, the mdlist will physically remove it during the call to mdlist->Insert
-                    if !Self::is_mdnode_exist(*md_current, edge) || is_delinv(pred_child.tag())
+                    if !Self::is_mdnode_exist(*md_current, edge as usize) || is_delinv(pred_child.tag())
                     {
                         // Check if our transaction has been aborted by another thread
                         match desc.status.load() {
@@ -620,7 +620,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
     unsafe fn delete_vertex<'t>(
         &'t self,
-        vertex: usize,
+        vertex: u64,
         desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
         deleted: &mut Shared<'t, Node<'a, T, E>>,
@@ -639,9 +639,9 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         let node_desc = Atomic::new(NodeDesc::new(Arc::clone(desc), opid));
 
         loop {
-            self.locate_pred(pred, current, vertex, guard);
+            self.locate_pred(pred, current, vertex as usize, guard);
 
-            if Self::is_node_exist(*current, vertex) {
+            if Self::is_node_exist(*current, vertex as usize) {
                 let current_desc = &current.as_ref().unwrap().node_desc; // Safe
                 let g_current_desc = current_desc.load(SeqCst, guard);
 
@@ -733,8 +733,8 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
 
     unsafe fn delete_edge<'t>(
         &'t self,
-        vertex: usize,
-        edge: usize,
+        vertex: u64,
+        edge: u64,
         direction_in: bool,
         desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
@@ -754,7 +754,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         let n_desc = Atomic::new(NodeDesc::new(Arc::clone(desc), opid));
         let g_n_desc = &mut n_desc.load(SeqCst, guard);
 
-        if self.find_vertex(current, g_n_desc, desc, vertex, guard) {
+        if self.find_vertex(current, g_n_desc, desc, vertex as usize, guard) {
             let md_list = &if direction_in {
                 current
                     .as_ref()
@@ -771,11 +771,11 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     .expect("NO MD LIST")
             };
             let md_current = &mut md_list.head().load(SeqCst, guard);
-            let coord = &MDList::<T, E>::key_to_coord(edge);
+            let coord = &MDList::<T, E>::key_to_coord(edge as usize);
             loop {
                 MDList::locate_pred(coord, md_pred, md_current, dim, pred_dim, guard);
 
-                if Self::is_mdnode_exist(*md_current, edge) {
+                if Self::is_mdnode_exist(*md_current, edge as usize) {
                     let current_desc = &md_current.as_ref().expect("NO CURRENT DESC").node_desc; // Safe
                     let g_current_desc = current_desc.load(SeqCst, guard);
 
@@ -830,7 +830,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     #[inline]
     unsafe fn find<'t>(
         &'t self,
-        key: usize,
+        key: u64,
         desc: &Arc<Desc<'a, T, E>>,
         opid: usize,
         guard: &Guard,
@@ -847,8 +847,8 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         let mut n_desc = Atomic::null();
 
         loop {
-            self.locate_pred(pred, current, key, guard);
-            if Self::is_node_exist(*current, key) {
+            self.locate_pred(pred, current, key as usize, guard);
+            if Self::is_node_exist(*current, key as usize) {
                 let current_ref = current.as_ref().unwrap();
                 let current_desc = &current_ref.node_desc;
 
@@ -910,7 +910,6 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
     ) where
         'a: 't,
     {
-        // FIXME:(rasmus) Safe deref_mut()?
         match desc.status.load() {
             OpStatus::Active => {}
             _ => return,
@@ -1253,7 +1252,8 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         let pred_next = &mut Shared::null();
 
         while let Some(curr_ref) = current.as_ref() {
-            if curr_ref.key >= key {
+            // FIXME:(rasvi) should this be curr_ref.key >= key?
+            if curr_ref.key == key {
                 break;
             }
             *pred = *current;
@@ -1261,7 +1261,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
             *pred_next = pred_n.load(SeqCst, guard).with_tag(clr_mark(pred_n.load(SeqCst, guard).tag()));
             *current = *pred_next;
 
-            while is_marked(current.as_ref().unwrap().next.load(SeqCst, guard).tag()) {
+            while let Some(true) = current.as_ref().map(|curr| is_marked(curr.next.load(SeqCst, guard).tag())) {
                 let next = current.as_ref().unwrap().next.load(SeqCst, guard);
                 *current = next.with_tag(clr_mark(next.tag()));
             }

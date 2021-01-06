@@ -25,12 +25,12 @@ pub enum ReturnCode<R> {
 
 #[derive(Clone)]
 pub enum OpType<'a, T, E> {
-    Find(usize),
-    Insert(usize, Option<T>),
-    Connect(&'a RefEntry<'a, 'a, T, E>, usize, E),
-    Delete(usize),
-    InsertEdge(usize, usize, Option<E>, bool),
-    DeleteEdge(usize, usize, bool),
+    Find(u64),
+    Insert(u64, Option<T>),
+    Connect(&'a RefEntry<'a, 'a, T, E>, u64, E),
+    Delete(u64),
+    InsertEdge(u64, u64, Option<E>, bool),
+    DeleteEdge(u64, u64, bool),
 }
 
 pub struct Operator<'a, T, E> {

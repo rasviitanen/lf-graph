@@ -1,3 +1,15 @@
+use crate::adjlist::AdjacencyList;
+use crate::adjlist::{IterRefEntry, RefEntry, Node as InternalNode};
+
+use crate::lftt::{OpType, ReturnCode};
+use std::{hash::{BuildHasher, Hash, Hasher}, marker::PhantomData, sync::atomic::Ordering::{SeqCst}};
+
+use crossbeam_epoch::{self as epoch, Atomic, Guard, Shared};
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
+use std::collections::hash_map::RandomState;
+use crate::types::*;
+
 pub type Range<'a, T> = Box<dyn Iterator<Item = T> + 'a>;
 
 pub trait GraphAPI {
@@ -22,29 +34,17 @@ pub trait GraphAPI {
     fn vertices(&self) -> Range<Self::Vertex>;
 }
 
-use crate::adjlist::AdjacencyList;
-use crate::adjlist::{IterRefEntry, RefEntry, Node as InternalNode};
-
-use crate::lftt::{OpType, ReturnCode};
-use std::sync::atomic::Ordering::{SeqCst};
-
-use crossbeam_epoch::{self as epoch, Atomic, Guard, Shared};
-use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
-
-use crate::types::*;
-
 pub trait Node {
     fn id(&self) -> usize;
 }
 
-struct GraphTxn<'a, 't, V: Node, E: Node>{
-    graph: &'t Graph<'a, V, E>,
+struct GraphTxn<'a, 't, K: Eq + Hash, V, E>{
+    graph: &'t Graph<'a, K, V, E>,
     operations: Vec<OpType<'a, V, E>>
 }
 
-impl<'a: 't, 't, V: Node, E: Node> GraphTxn<'a, 't, V, E> {
-    pub fn new(graph: &'t Graph<'a, V, E>) -> Self {
+impl<'a: 't, 't, K: Eq + Hash, V, E> GraphTxn<'a, 't, K, V, E> {
+    pub fn new(graph: &'t Graph<'a, K, V, E>) -> Self {
         Self {
             graph,
             operations: Vec::new(),
@@ -52,32 +52,32 @@ impl<'a: 't, 't, V: Node, E: Node> GraphTxn<'a, 't, V, E> {
     }
 
     #[must_use = "Transaction does nothing unless executed"]
-    pub fn insert(&mut self, v: V) -> &mut Self {
-        self.operations.push(OpType::Insert(v.id(), Some(v)));
+    pub fn insert(&mut self, k: K, v: V) -> &mut Self {
+        self.operations.push(OpType::Insert(make_hash(&self.graph.hasher, &k), Some(v)));
         self
     }
 
     #[must_use = "Transaction does nothing unless executed"]
-    pub fn delete_vertex(&mut self, key: usize) -> &mut Self {
-        self.operations.push(OpType::Delete(key));
+    pub fn delete_vertex(&mut self, k: K) -> &mut Self {
+        self.operations.push(OpType::Delete(make_hash(&self.graph.hasher, &k)));
         self
     }
 
     #[must_use = "Transaction does nothing unless executed"]
-    pub fn find_vertex(&mut self, key: usize) -> &mut Self {
-        self.operations.push(OpType::Find(key));
+    pub fn find_vertex(&mut self, k: K) -> &mut Self {
+        self.operations.push(OpType::Find(make_hash(&self.graph.hasher, &k)));
         self
     }
 
     #[must_use = "Transaction does nothing unless executed"]
-    pub fn insert_edge(&mut self, vertex_key: usize, edge_key: usize, edge_info: Option<E>) -> &mut Self {
-        self.operations.push(OpType::InsertEdge(vertex_key, edge_key, edge_info, true));
+    pub fn insert_edge(&mut self, vertex_key: K, edge_key: K, edge_info: Option<E>) -> &mut Self {
+        self.operations.push(OpType::InsertEdge(make_hash(&self.graph.hasher, &vertex_key), make_hash(&self.graph.hasher, &edge_key), edge_info, true));
         self
     }
 
     #[must_use = "Transaction does nothing unless executed"]
-    pub fn delete_edge(&mut self, vertex_key: usize, edge_key: usize) -> &mut Self {
-        self.operations.push(OpType::DeleteEdge(vertex_key, edge_key, true));
+    pub fn delete_edge(&mut self, vertex_key: K, edge_key: K) -> &mut Self {
+        self.operations.push(OpType::DeleteEdge(make_hash(&self.graph.hasher, &vertex_key), make_hash(&self.graph.hasher, &edge_key), true));
         self
     }
 
@@ -88,47 +88,66 @@ impl<'a: 't, 't, V: Node, E: Node> GraphTxn<'a, 't, V, E> {
     }
 }
 
-pub struct Graph<'a, V: Node, E: Node> {
+pub struct Graph<'a, K, V, E, S = RandomState> {
     inner: AdjacencyList<'a, V, E>,
+    phantom: PhantomData<K>,
+    hasher: S,
 }
 
-impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
+#[inline]
+fn make_hash<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, val: &K) -> u64 {
+    let mut state = hash_builder.build_hasher();
+    val.hash(&mut state);
+    state.finish()
+}
+
+impl<'a, K, V, E> Graph<'a, K, V, E, RandomState> {
     pub fn new() -> Self {
         Self {
             inner: AdjacencyList::new(),
+            phantom: PhantomData,
+            hasher: RandomState::new(),
         }
     }
+}
 
+impl<'a, K: 'a + Eq + Hash, V: 'a, E> Graph<'a, K, V, E, RandomState> {
     pub fn add_vertex<'t>(
         &'t self,
+        key: K,
         value: V,
-    ) -> Option<(usize, RefEntry<'a, 't, V, E>)> {
-        let key = value.id();
+    ) -> Option<RefEntry<'a, 't, V, E>> {
+        let key = make_hash(&self.hasher, &key);
         let op = OpType::Insert(key, Some(value));
         let insertion_txn = self.inner.txn(vec![op]).execute();
 
         if let Ok(ReturnCode::Inserted(entry)) = insertion_txn.recv() {
-            Some((key, entry))
+            Some(entry)
         } else {
             None
         }
     }
 
-    pub fn add_edge(&self, parent_id: usize, edge: E, direction_in: bool) {
-        let op = OpType::InsertEdge(parent_id, edge.id(), Some(edge), direction_in);
+    pub fn add_edge(&self, parent_key: K, edge_key: K, edge: E, direction_in: bool) {
+        let parent_key = make_hash(&self.hasher, &parent_key);
+        let edge_key = make_hash(&self.hasher, &edge_key);
+        let op = OpType::InsertEdge(parent_key, edge_key, Some(edge), direction_in);
         let insert_edge_txn = self.inner.txn(vec![op]);
         insert_edge_txn.execute().recv().expect("Txn failed");
     }
 
-    pub fn add_empty_edge(&self, parent: usize, child: usize, direction_in: bool) {
-        let op = OpType::InsertEdge(parent, child, None, direction_in);
+    pub fn add_empty_edge(&self, parent_key: K, edge_key: K, direction_in: bool) {
+        let parent_key = make_hash(&self.hasher, &parent_key);
+        let edge_key = make_hash(&self.hasher, &edge_key);
+        let op = OpType::InsertEdge(parent_key, edge_key, None, direction_in);
         let insert_edge_txn = self.inner.txn(vec![op]);
         insert_edge_txn.execute().recv().expect("Txn failed");
     }
 
-    pub fn connect<'t>(parent: &InternalNode<V, E>, child: E, direction_in: bool) {
+    pub fn connect<'t>(&self, parent: &InternalNode<V, E>, edge_key: K, edge: E, direction_in: bool) {
+        let edge_key = make_hash(&self.hasher, &edge_key);
         unsafe {
-            AdjacencyList::connect(parent, child.id(), child, direction_in);
+            AdjacencyList::connect(parent, edge_key, edge, direction_in);
         }
     }
 
@@ -137,7 +156,8 @@ impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
         self.inner.iter(guard)
     }
 
-    pub fn find_vertex<'t>(&'t self, key: usize) -> Option<RefEntry<'a, 't, V, E>> {
+    pub fn find_vertex<'t>(&'t self, key: K) -> Option<RefEntry<'a, 't, V, E>> {
+        let key = make_hash(&self.hasher, &key);
         let op = OpType::Find(key);
         let find_txn = self.inner.txn(vec![op]);
         let res = find_txn.execute();
@@ -149,7 +169,8 @@ impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
         }
     }
 
-    pub fn delete_vertex<'t>(&'t self, key: usize) -> Option<RefEntry<'a, 't, V, E>> {
+    pub fn delete_vertex<'t>(&'t self, key: K) -> Option<RefEntry<'a, 't, V, E>> {
+        let key = make_hash(&self.hasher, &key);
         let op = OpType::Delete(key);
         let insertion_txn = self.inner.txn(vec![op]).execute();
 
@@ -162,11 +183,14 @@ impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
 
     pub fn delete_edge<'t>(
         &'t self,
-        parent: usize,
-        edge: usize,
+        parent_key: K,
+        edge_key: K,
         direction_in: bool,
     ) -> Result<(), ()> {
-        let op = OpType::DeleteEdge(parent, edge, direction_in);
+        let parent_key = make_hash(&self.hasher, &parent_key);
+        let edge_key = make_hash(&self.hasher, &edge_key);
+
+        let op = OpType::DeleteEdge(parent_key, edge_key, direction_in);
         let insertion_txn = self.inner.txn(vec![op]).execute();
 
         if let Ok(ReturnCode::Success) = insertion_txn.recv() {
@@ -191,106 +215,74 @@ impl<'a, V: 'a + Node, E: Node> Graph<'a, V, E> {
 mod graph_tests {
     use super::*;
 
-    #[derive(Debug)]
-    pub struct Vertex {
-        id: usize,
-        data: usize,
-    }
-
-    #[derive(Debug)]
-    pub struct Edge {
-        pub points_to: usize,
-        pub extra_data: Option<usize>,
-    }
-
-    impl Node for Vertex {
-        fn id(&self) -> usize {
-            self.id
-        }
-    }
-
-    impl Node for Edge {
-        fn id(&self) -> usize {
-            self.points_to
-        }
-    }
-
     #[test]
     fn test_vertex_insertion() {
-        let graph = Graph::<Vertex, Edge>::new();
-        graph.add_vertex(Vertex{ id: 1, data: 123 });
-        graph.add_vertex(Vertex{ id: 2, data: 345 });
-        graph.add_vertex(Vertex{ id: 3, data: 678 });
+        let graph = Graph::<u32, u32, u32>::new();
+        graph.add_vertex(1, 123);
+        graph.add_vertex(2, 345);
+        graph.add_vertex(3, 678);
         let vertices: Vec<_> =  graph.iter_vertices().collect();
-        assert_eq!(vertices[0].value().map(|v| v.data), Some(123));
-        assert_eq!(vertices[1].value().map(|v| v.data), Some(345));
-        assert_eq!(vertices[2].value().map(|v| v.data), Some(678));
+        assert_eq!(vertices[0].value(), Some(&123));
+        assert_eq!(vertices[1].value(), Some(&345));
+        assert_eq!(vertices[2].value(), Some(&678));
     }
 
     #[test]
     fn test_find_vertex() {
-        let graph = Graph::<Vertex, Edge>::new();
-        graph.add_vertex(Vertex{ id: 1, data: 123 });
-        let vertex = graph.find_vertex(1);
+        let graph = Graph::<&str, u32, u32>::new();
+        graph.add_vertex("vertex1", 123);
+        let vertex = graph.find_vertex("vertex1");
         assert!(vertex.is_some());
-        assert_eq!(vertex.unwrap().value().map(|v| v.data), Some(123));
+        assert_eq!(vertex.unwrap().value(), Some(&123));
     }
 
     #[test]
     fn test_delete_vertex() {
-        let graph = Graph::<Vertex, Edge>::new();
-        graph.add_vertex(Vertex{ id: 1, data: 123 });
+        let graph = Graph::<u32, u32, u32>::new();
+        graph.add_vertex(1, 123);
         let vertex = graph.find_vertex(1);
         assert!(vertex.is_some());
-        assert_eq!(vertex.unwrap().value().map(|v| v.data), Some(123));
+        assert_eq!(vertex.unwrap().value(), Some(&123));
         let deleted = graph.delete_vertex(1);
-        assert_eq!(deleted.unwrap().value().map(|v| v.data), Some(123));
+        assert_eq!(deleted.unwrap().value(), Some(&123));
         let vertex = graph.find_vertex(1);
         assert!(vertex.is_none());
     }
 
     #[test]
     fn test_edge_insertion() {
-        let graph = Graph::<Vertex, Edge>::new();
-        graph.add_vertex(Vertex{ id: 1, data: 123 });
-        graph.add_vertex(Vertex{ id: 2, data: 123 });
+        let graph = Graph::<u32, u32, bool>::new();
+        graph.add_vertex(1, 123);
+        graph.add_vertex(2, 123);
 
         let vertices: Vec<_> =  graph.iter_vertices().collect();
         assert_eq!(vertices[0].in_edges.as_ref().unwrap().len(), 0);
-        graph.add_edge(1, Edge {
-            points_to: 2,
-            extra_data: Some(12345),
-        }, true);
+        graph.add_edge(1, 2, true, true);
         assert_eq!(vertices[0].in_edges.as_ref().unwrap().len(), 1);
     }
 
-
     #[test]
     fn test_in_neigh() {
-        let graph = Graph::<Vertex, Edge>::new();
-        graph.add_vertex(Vertex{ id: 1, data: 123 });
-        graph.add_vertex(Vertex{ id: 2, data: 123 });
+        let graph = Graph::<u32, u32, u32>::new();
+        graph.add_vertex(1, 123);
+        graph.add_vertex(2, 123);
 
         let vertices: Vec<_> =  graph.iter_vertices().collect();
         assert_eq!(vertices[0].in_edges.as_ref().unwrap().len(), 0);
-        graph.add_edge(1, Edge {
-            points_to: 2,
-            extra_data: Some(12345),
-        }, true);
+        graph.add_edge(1, 2, 3, true);
 
 
         let in_neigh = graph.in_neigh(&vertices[0]).collect::<Vec<_>>();
-        assert_eq!(in_neigh[0].points_to, 2);
+        assert_eq!(in_neigh[0], &3);
     }
-
 
     #[test]
     fn test_txn_simple() {
-        let graph = Graph::<Vertex, Edge>::new();
+    let graph = Graph::<u32, u32, u32>::new();
         GraphTxn::new(&graph)
-            .insert(Vertex { id: 1, data: 123 } )
-            .insert(Vertex { id: 2, data: 456 } )
-            .insert(Vertex { id: 3, data: 789 } )
+            .insert(1, 1)
+            .insert(2, 2)
+            .insert(3, 3)
             .execute();
 
         let result = GraphTxn::new(&graph)
@@ -301,7 +293,7 @@ mod graph_tests {
 
         for i in 1..=3 {
             if let Ok(ReturnCode::Found(v)) = result.recv() {
-                assert_eq!(v.value().unwrap().id, i);
+                assert_eq!(v.value().unwrap(), &i);
             } else {
                 panic!("Could not find inserted vertices");
             }
@@ -310,14 +302,14 @@ mod graph_tests {
 
     #[test]
     fn test_threaded_txn_simple() {
-        let graph = Arc::new(Graph::<Vertex, Edge>::new());
+        let graph = Arc::new(Graph::<u32, u32, u32>::new());
 
         let graph_clone = Arc::clone(&graph);
         let tx1 = std::thread::spawn(move || {
             GraphTxn::new(&graph_clone)
-                .insert(Vertex { id: 1, data: 123 } )
-                .insert(Vertex { id: 2, data: 456 } )
-                .insert(Vertex { id: 3, data: 789 } )
+                .insert(1, 1)
+                .insert(2, 2)
+                .insert(3, 3)
                 .execute();
         });
 
@@ -332,7 +324,7 @@ mod graph_tests {
 
         for i in 1..=3 {
             if let Ok(ReturnCode::Found(v)) = result.recv() {
-                assert_eq!(v.value().unwrap().id, i);
+                assert_eq!(v.value().unwrap(), &i);
             } else {
                 panic!("Could not find inserted vertices, {:?}", i);
             }
@@ -341,28 +333,27 @@ mod graph_tests {
 
     #[test]
     fn test_multiple_txn_simple() {
-        let graph = Graph::<Vertex, Edge>::new();
+        let graph = Graph::<u32, u32, u32>::new();
 
         GraphTxn::new(&graph)
-            .insert(Vertex { id: 1, data: 1 } )
-            .insert(Vertex { id: 2, data: 2 } )
+            .insert(1, 1)
+            .insert(2, 2)
             .execute();
 
         GraphTxn::new(&graph)
-                .insert(Vertex { id: 3, data: 3 } )
-                .insert(Vertex { id: 4, data: 4 } )
+                .insert(3, 3)
+                .insert(4, 4)
                 .execute();
 
         GraphTxn::new(&graph)
-                .insert(Vertex { id: 5, data: 5 } )
-                .insert(Vertex { id: 6, data: 6 } )
+                .insert(5, 5)
+                .insert(6, 6)
                 .execute();
 
         GraphTxn::new(&graph)
-                .insert(Vertex { id: 7, data: 7 } )
-                .insert(Vertex { id: 8, data: 8 } )
+                .insert(7, 7)
+                .insert(8, 8)
                 .execute();
-
 
         let result = GraphTxn::new(&graph)
             .find_vertex(1)
@@ -377,7 +368,7 @@ mod graph_tests {
 
         for i in 1..=8 {
             if let Ok(ReturnCode::Found(v)) = result.recv() {
-                assert_eq!(v.value().unwrap().id, i);
+                assert_eq!(v.value().unwrap(), &i);
             } else {
                 panic!("Could not find inserted vertices, {:?}", i);
             }
