@@ -1,10 +1,10 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use hypergraph::Graph;
+use lf_graph::Graph;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
 pub fn criterion_benchmark(c: &mut Criterion) {
-    c.bench_function("hypergraph-add-vertex", |b| {
+    c.bench_function("graph-add-vertex", |b| {
         b.iter(|| {
             let graph = Graph::<u32, u32, u32>::new();
             for i in 0..100 {
