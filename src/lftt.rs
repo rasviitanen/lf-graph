@@ -1,9 +1,5 @@
 use crate::adjlist::RefEntry;
 use crossbeam_utils::atomic::AtomicCell;
-
-use std::alloc::{alloc, dealloc, handle_alloc_error, Layout};
-use std::mem;
-use std::ptr;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -27,6 +23,7 @@ pub enum ReturnCode<R> {
 pub enum OpType<'a, T, E> {
     Find(u64),
     Insert(u64, Option<T>),
+    #[allow(dead_code)]
     Connect(&'a RefEntry<'a, 'a, T, E>, u64, E),
     Delete(u64),
     InsertEdge(u64, u64, Option<E>, bool),
@@ -51,16 +48,6 @@ impl<'a, T: 'a, E: 'a> Desc<'a, T, E> {
             size: ops.len(),
             pending: (0..ops.len()).map(|_| AtomicCell::new(true)).collect(),
             ops: std::cell::RefCell::new(ops),
-        }
-    }
-
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            status: AtomicCell::new(OpStatus::Committed),
-            size: 0,
-            ops: std::cell::RefCell::new(Vec::new()),
-            pending: Vec::new(),
         }
     }
 }

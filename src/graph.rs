@@ -1,14 +1,13 @@
+#![allow(dead_code)]
+
 use crate::adjlist::AdjacencyList;
 use crate::adjlist::{IterRefEntry, RefEntry, Node as InternalNode};
 
 use crate::lftt::{OpType, ReturnCode};
-use std::{hash::{BuildHasher, Hash, Hasher}, marker::PhantomData, sync::atomic::Ordering::{SeqCst}};
+use std::{hash::{BuildHasher, Hash, Hasher}, marker::PhantomData};
 
-use crossbeam_epoch::{self as epoch, Atomic, Guard, Shared};
-use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use crossbeam_epoch::{self as epoch};
 use std::collections::hash_map::RandomState;
-use crate::types::*;
 
 pub type Range<'a, T> = Box<dyn Iterator<Item = T> + 'a>;
 
@@ -34,11 +33,7 @@ pub trait GraphAPI {
     fn vertices(&self) -> Range<Self::Vertex>;
 }
 
-pub trait Node {
-    fn id(&self) -> usize;
-}
-
-struct GraphTxn<'a, 't, K: Eq + Hash, V, E>{
+pub struct GraphTxn<'a, 't, K: Eq + Hash, V, E>{
     graph: &'t Graph<'a, K, V, E>,
     operations: Vec<OpType<'a, V, E>>
 }
@@ -214,6 +209,7 @@ impl<'a, K: 'a + Eq + Hash, V: 'a, E> Graph<'a, K, V, E, RandomState> {
 #[cfg(test)]
 mod graph_tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_vertex_insertion() {

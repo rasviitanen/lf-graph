@@ -6,7 +6,6 @@ use crossbeam_epoch::{self as epoch, Atomic, Guard, Owned, Shared};
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
-use crossbeam_utils::atomic::AtomicCell;
 
 const KEY_RANGE: usize = 1024;
 const BASIS: usize = 16;
@@ -264,9 +263,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         let guard = &*(guard as *const _);
         *inserted = Shared::null();
         let cursor = self.cursor.load_consume(guard);
-
         let current = &mut self.head.load_consume(guard);
-
         let n_desc = Atomic::new(NodeDesc::new(Arc::clone(desc), opid));
         loop {
             // if self.bloom_filter.might_contain(vertex) {
@@ -1007,7 +1004,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                         md_ins_pred_dims.push(pred_dim);
                     }
 
-                    OpType::Connect(vertex, edge_id, edge) => {
+                    OpType::Connect(_, _, _) => {
                         panic!("INSTRUCTION NOT ALLOWED IN TXN");
                     }
 
@@ -1317,7 +1314,6 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
         preds: &[Shared<'t, Node<'a, T, E>>],
         md_nodes: &[Shared<MDNode<'a, E, T>>],
         md_preds: &[Shared<MDNode<'a, E, T>>],
-        // parents: &[Shared<'a, Node<'a, T, E>>],
         dims: &[usize],
         pred_dims: &[usize],
         desc: &Arc<Desc<'a, T, E>>,
@@ -1348,9 +1344,7 @@ impl<'a: 'd + 'g, 'd, 'g, T: 'a, E: 'a> AdjacencyList<'a, T, E> {
                     let fetched = n_next.fetch_or(0x1, SeqCst, guard);
                     let succ = fetched.with_tag(clr_mark(fetched.tag()));
 
-                    pred_next.compare_and_set(n, succ, SeqCst, guard).is_ok();
-
-                    // assert!(pred_next.compare_and_set(n, succ, SeqCst, guard).is_ok());
+                    let _ = pred_next.compare_and_set(n, succ, SeqCst, guard);
                 }
             }
         }
